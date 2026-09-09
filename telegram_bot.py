@@ -2,56 +2,57 @@ import os
 import asyncio
 from dotenv import load_dotenv
 
-from aiogram import F
-from aiogram.fsm.state import State, StatesGroup
+# Aiogram (Telegram Bot Framework)
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
+from aiogram.fsm.state import State, StatesGroup
 
-# LangChain импорты
-from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
-from langchain.chains import create_retrieval_chain, create_history_aware_retriever
+# LangChain (Core & Chains)
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_community.chat_message_histories import PostgresChatMessageHistory
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
-
-from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
-from langchain_core.documents import Document
-from langchain_core.prompts import PromptTemplate
-from langchain_community.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
+# LangChain (Data structures & Prompts)
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
+from langchain_core.runnables.history import RunnableWithMessageHistory
 
-# 1. Определение состояний FSM
+# LangChain (Community extensions & Integrations)
+from langchain_community.chat_message_histories import PostgresChatMessageHistory
+from langchain_community.document_loaders import PyMuPDFLoader
+from langchain_community.retrievers import BM25Retriever
+from langchain_community.vectorstores import Chroma
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+
+
+# --- 1. State Machine Definitions ---
 class UserState(StatesGroup):
     waiting_for_car_model = State()
     waiting_for_pdf = State()
     chatting = State()
 
 
-print("Загрузка переменных окружения...")
+# --- 2. Initialization & Configuration ---
 load_dotenv()
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING", "postgresql://postgres:postgres@localhost:5433/kia_bot_db")
 
-# 2. Глобальные подключения (только те, что общие для всех)
-print("Подключение к векторной базе ChromaDB...")
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 vectorstore = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
-
 llm = ChatGroq(model_name="openai/gpt-oss-20b", temperature=0)
 
-bot = Bot(token=TELEGRAM_TOKEN)
+# Set custom timeout for downloading large PDF files
+session = AiohttpSession(timeout=600)
+bot = Bot(token=TELEGRAM_TOKEN, session=session)
 dp = Dispatcher()
 
 
-# 3. Управление историей сессий в PostgreSQL
+# --- 3. Database & Memory Management ---
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
     return PostgresChatMessageHistory(
         connection_string=DB_CONNECTION_STRING,
@@ -60,18 +61,16 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
     )
 
 
-# 4. ДИНАМИЧЕСКАЯ СБОРКА ЦЕПИ ПОЛЬЗОВАТЕЛЯ (Изоляция данных)
+# --- 4. RAG Pipeline Builder (Multi-Tenant) ---
 def get_user_chain(chat_id: str, car_model: str):
-    # Векторный поиск строго по chat_id
     user_vector_retriever = vectorstore.as_retriever(
         search_kwargs={"filter": {"chat_id": chat_id}, "k": 3}
     )
 
-    # Выгружаем документы конкретного юзера для BM25
     user_docs = vectorstore.get(where={"chat_id": chat_id}, include=["documents", "metadatas"])
 
     if not user_docs["documents"]:
-        raise ValueError("Ваша база данных пуста. Пожалуйста, загрузите PDF-мануал.")
+        raise ValueError("Your database is empty. Please upload a PDF manual first.")
 
     bm25_docs = [
         Document(page_content=doc, metadata=meta)
@@ -80,16 +79,20 @@ def get_user_chain(chat_id: str, car_model: str):
     user_bm25_retriever = BM25Retriever.from_documents(bm25_docs)
     user_bm25_retriever.k = 3
 
-    # Персональный гибридный поиск
     user_ensemble_retriever = EnsembleRetriever(
         retrievers=[user_bm25_retriever, user_vector_retriever],
         weights=[0.3, 0.7]
     )
 
-    # Промпты
+    contextualize_q_system_prompt = (
+        "Given a chat history and the latest user question "
+        "which might reference context in the chat history, "
+        "formulate a standalone question which can be understood "
+        "without the chat history. Do NOT answer the question, "
+        "just reformulate it if needed and otherwise return it as is."
+    )
     contextualize_q_prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "Учитывая историю чата и последний вопрос пользователя, сформулируй самостоятельный вопрос, который можно понять без истории чата. НЕ отвечай на вопрос, просто переформулируй его, если нужно, иначе верни как есть."),
+        ("system", contextualize_q_system_prompt),
         MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
     ])
@@ -97,19 +100,19 @@ def get_user_chain(chat_id: str, car_model: str):
 
     document_prompt = PromptTemplate(
         input_variables=["page_content", "page"],
-        template="[Страница в базе: {page}]\n{page_content}"
+        template="[Page in database: {page}]\n{page_content}"
     )
 
-    # Динамический системный промпт с маркой авто пользователя
     qa_system_prompt = (
-        f"Ты — полезный ИИ-ассистент, эксперт по автомобилю {car_model}. "
-        "Используй следующий контекст для ответа на вопрос. Перед каждым абзацем указана его 'Страница в базе'. "
-        "ТВОЯ ЗАДАЧА: Сформируй ответ. Если ты брал факты из текста, ОБЯЗАТЕЛЬНО добавь в конец ответа с новой строки: "
-        "'📖 *Источник: стр. X*', где X — это номер 'Страницы в базе' ПЛЮС 1 (так как база считает с нуля). "
-        "Указывай только те страницы, из которых ты РЕАЛЬНО взял факты. Проигнорируй страницы с нерелевантным мусором. "
-        "Если вопрос — это просто приветствие или болтовня, не указывай страницы вообще. "
-        "Отвечай кратко на русском языке.\n\n"
-        "Контекст:\n{{context}}"
+        f"You are a helpful AI assistant, an expert on the {car_model} vehicle. "
+        "Use the following pieces of retrieved context to answer the question. "
+        "Each paragraph is preceded by its 'Page in database'. "
+        "YOUR TASK: Formulate an answer. If you use facts from the text, YOU MUST add to the end of your answer on a new line: "
+        "'📖 *Source: page X*', where X is the 'Page in database' number PLUS 1 (since the database is zero-indexed). "
+        "Cite only the pages from which you ACTUALLY took facts. Ignore pages with irrelevant garbage. "
+        "If the question is just a greeting or small talk, do not cite any pages. "
+        "Answer concisely and in the EXACT SAME LANGUAGE as the user's question.\n\n"
+        "Context:\n{context}"
     )
     qa_prompt = ChatPromptTemplate.from_messages([
         ("system", qa_system_prompt),
@@ -129,9 +132,8 @@ def get_user_chain(chat_id: str, car_model: str):
     )
 
 
-# 5. Хэндлеры Telegram
-
-@dp.message(CommandStart())
+# --- 5. Telegram Handlers ---
+@dp.message(CommandStart(), StateFilter('*'))
 async def send_welcome(message: types.Message, state: FSMContext):
     session_id = str(message.chat.id)
     history = get_session_history(session_id)
@@ -139,22 +141,24 @@ async def send_welcome(message: types.Message, state: FSMContext):
 
     await state.set_state(UserState.waiting_for_car_model)
     await message.answer(
-        "Привет! Я умный ассистент по автомобилям.\n\nНапиши марку и модель твоего авто (например: BMW X5 или Mazda 3):")
+        "Hello! I'm a smart car assistant.\n\n"
+        "Please write the make and model of your car (e.g., BMW X5 or Mazda 3):"
+    )
 
 
-@dp.message(Command("clear"))
+@dp.message(Command("clear"), StateFilter('*'))
 async def clear_history(message: types.Message, state: FSMContext):
     session_id = str(message.chat.id)
     history = get_session_history(session_id)
     history.clear()
-    await message.answer("Контекст диалога удален из базы данных! Можешь задавать новые вопросы.")
+    await message.answer("Chat context has been deleted from the database! You can start asking new questions.")
 
 
 @dp.message(UserState.waiting_for_car_model)
 async def process_car_model(message: types.Message, state: FSMContext):
     await state.update_data(car_model=message.text)
     await state.set_state(UserState.waiting_for_pdf)
-    await message.answer(f"Отлично, {message.text}! Теперь отправь мне PDF-файл с мануалом для этой машины.")
+    await message.answer(f"Great, {message.text}! Now please send me the PDF manual for this car.")
 
 
 @dp.message(UserState.waiting_for_pdf, F.document)
@@ -162,20 +166,22 @@ async def process_pdf_document(message: types.Message, state: FSMContext):
     document = message.document
 
     if not document.file_name.lower().endswith('.pdf'):
-        await message.answer("Пожалуйста, отправь файл в формате PDF.")
+        await message.answer("Please send a file in PDF format.")
         return
 
-    status_msg = await message.answer("Скачиваю файл и нарезаю мануал... Это займет пару минут ⏳")
+    status_msg = await message.answer(
+        "Downloading the file and processing the manual... This will take a couple of minutes ⏳"
+    )
 
     os.makedirs("user_manuals", exist_ok=True)
     file_path = f"user_manuals/{message.chat.id}_{document.file_name}"
+
     await bot.download(document, destination=file_path)
 
     try:
         loader = PyMuPDFLoader(file_path)
         docs = loader.load()
 
-        # Исправление кодировки
         for doc in docs:
             try:
                 doc.page_content = doc.page_content.encode('latin1', errors='ignore').decode('cp1251', errors='ignore')
@@ -189,32 +195,30 @@ async def process_pdf_document(message: types.Message, state: FSMContext):
         )
         chunks = text_splitter.split_documents(docs)
 
-        # ИЗОЛЯЦИЯ ДАННЫХ: Привязываем каждый кусок к текущему chat_id
         chat_id_str = str(message.chat.id)
         for chunk in chunks:
             chunk.metadata["chat_id"] = chat_id_str
 
-        # Загрузка в общую векторную базу
         vectorstore.add_documents(chunks)
 
         await state.set_state(UserState.chatting)
         await status_msg.edit_text(
-            "✅ Мануал успешно загружен, изучен и добавлен в твою личную базу! Задавай свои вопросы.")
+            "✅ The manual has been successfully loaded and added to your personal database! Ask your questions."
+        )
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка при обработке PDF: {e}")
+        await status_msg.edit_text(f"❌ Error processing PDF: {e}")
 
 
 @dp.message(UserState.chatting)
 async def handle_message(message: types.Message, state: FSMContext):
     session_id = str(message.chat.id)
     user_data = await state.get_data()
-    car_model = user_data.get("car_model", "твоего автомобиля")
+    car_model = user_data.get("car_model", "your car")
 
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
     try:
-        # Динамическая генерация цепи под текущего пользователя
         user_chain = get_user_chain(chat_id=session_id, car_model=car_model)
 
         response = await user_chain.ainvoke(
@@ -228,11 +232,11 @@ async def handle_message(message: types.Message, state: FSMContext):
         await message.answer(str(ve))
         await state.set_state(UserState.waiting_for_pdf)
     except Exception as e:
-        await message.answer(f"Произошла ошибка при обработке запроса: {e}")
+        await message.answer(f"An error occurred while processing your request: {e}")
 
 
 async def main():
-    print("Telegram-бот на Aiogram запущен!")
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 

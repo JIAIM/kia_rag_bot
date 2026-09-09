@@ -1,0 +1,12 @@
+aiogram==3.*
+langchain
+langchain-groq
+langchain-huggingface
+langchain-community
+chromadb
+sentence-transformers
+python-dotenv
+rank_bm25
+psycopg[binary]
+langchain-postgres
+pymupdf

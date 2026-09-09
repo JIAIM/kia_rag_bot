@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: rag_postgres_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kia_bot_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: always
+
+  bot:
+    build: .
+    container_name: rag_telegram_bot
+    env_file:
+      - .env
+    depends_on:
+      - db
+    environment:
+      DB_CONNECTION_STRING: "postgresql://postgres:postgres@db:5432/kia_bot_db"
+    volumes:
+      - chroma_data:/app/chroma_db
+      - manuals_data:/app/user_manuals
+    restart: always
+
+volumes:
+  pgdata:
+  chroma_data:
+  manuals_data:
