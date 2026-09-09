@@ -6,11 +6,8 @@
 
 ## Features
 
-# Multi-Tenant RAG Telegram Bot
-
 A scalable, multi-tenant Telegram bot that allows users to upload their own vehicle PDF manuals and interact with them using a Retrieval-Augmented Generation (RAG) pipeline. The system ensures complete data isolation between users and maintains individual chat histories.
 
-## Features
 * **Multi-Tenancy & Data Isolation:** Each user's uploaded PDF is tagged with their unique Telegram `chat_id`. The vector database strictly filters context, ensuring users only retrieve information from their own documents.
 * **Dynamic Ingestion (On-the-fly):** Users upload PDFs directly in Telegram. The bot automatically extracts text, fixes encoding issues, chunks the data, and embeds it into the vector store.
 * **Hybrid Search (Ensemble Retriever):** Combines BM25 (lexical search) and ChromaDB (semantic search) for highly accurate retrieval.
