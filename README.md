@@ -1,5 +1,13 @@
 # Multi-Tenant RAG Telegram Bot
 
+> **What does this bot do?**
+> Have you ever tried searching through a 500-page car manual just to find the correct tire pressure? This bot solves that problem. 
+> Users can upload their own car's PDF manual directly in Telegram. The bot reads it, remembers it, and acts as a personal mechanic — answering any technical questions instantly and citing the exact page numbers from the uploaded document.
+
+## Features
+
+# Multi-Tenant RAG Telegram Bot
+
 A scalable, multi-tenant Telegram bot that allows users to upload their own vehicle PDF manuals and interact with them using a Retrieval-Augmented Generation (RAG) pipeline. The system ensures complete data isolation between users and maintains individual chat histories.
 
 ## Features

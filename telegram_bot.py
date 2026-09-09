@@ -141,8 +141,14 @@ async def send_welcome(message: types.Message, state: FSMContext):
 
     await state.set_state(UserState.waiting_for_car_model)
     await message.answer(
-        "Hello! I'm a smart car assistant.\n\n"
-        "Please write the make and model of your car (e.g., BMW X5 or Mazda 3):"
+        "👋 **Hello! I am a smart AI assistant for your car.**\n\n"
+        "I can read your car's manual and instantly answer any questions with exact page citations.\n\n"
+        "**How it works:**\n"
+        "1️⃣ Tell me your car's make and model.\n"
+        "2️⃣ Upload the official PDF manual.\n"
+        "3️⃣ Ask me anything about maintenance, tires, dashboard lights, etc.\n\n"
+        "Let's start! **Write the make and model of your car (e.g., Kia Ceed or BMW X5):**",
+        parse_mode="Markdown"
     )
 
 
